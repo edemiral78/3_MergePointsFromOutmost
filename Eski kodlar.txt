@@ -1,0 +1,611 @@
+import os
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Circle
+from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, Polygon
+from tqdm import tqdm
+import folium
+import numpy as np
+import math
+from geopy import distance
+from geographiclib.geodesic import Geodesic
+import pyautogui
+import time
+from datetime import datetime
+from colorama import Fore, Style
+import random
+import itertools
+from scipy.spatial import cKDTree
+from concurrent.futures import ProcessPoolExecutor
+
+def createFolder(directory):
+    try:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+    except OSError:
+        print('Error: Creating directory. ' + directory)
+
+def DefineFolders():
+    InputFolder = 'Input'
+    OutputFolder = 'Output'
+    createFolder('{}'.format(OutputFolder))
+    return InputFolder, OutputFolder
+
+def ReadDataSets(FileName1, FileName2):
+    #FileName1 = 'Points_DataSet'  # PointID, Lat, lon, Ağırlık: İçerdiği Nokta Sayısı, Birleşim Sayısı
+    Points_DataSet = np.loadtxt('{}/{}.txt'.format(InputFolder, FileName1), usecols=(0, 1, 2, 3, 4), skiprows=0)
+    # print(f"{Fore.GREEN}{Style.BRIGHT}{FileName} Dosyasından veriler okundu...{Style.RESET_ALL}")
+
+    #FileName2 = 'Routes_DataSet'  # RouteNo, PointID, BearingToNext, BearingToPrev
+    Routes_DataSet = np.loadtxt('{}/{}.txt'.format(InputFolder, FileName2), usecols=(0, 1, 2, 3), skiprows=0)
+    print(f"{Fore.GREEN}{Style.BRIGHT}{FileName1} ve {FileName2} dosyalarından veriler okundu...{Style.RESET_ALL}")
+    return Points_DataSet, Routes_DataSet
+
+def PrintDataInformation(Routes_DataSet, Points_DataSet):
+    route_numbers, route_counts = np.unique(Routes_DataSet[:, 0], return_counts=True)
+    # En çok nokta içeren rotanın numarasını ve içerdiği nokta sayısını bul
+    max_points_route_no = int(route_numbers[np.argmax(route_counts)])
+    max_points_count = np.max(route_counts)
+    print(f"{Fore.YELLOW}{Style.BRIGHT}Rota Sayısı: {len(route_numbers)}, Toplam Nokta sayısı: {len(Points_DataSet)}{Style.RESET_ALL}")
+    print(
+        f"{Fore.YELLOW}{Style.BRIGHT}En çok noktayı içeren rotaNo: {max_points_route_no}, İçerdiği Nokta Sayısı: {max_points_count}{Style.RESET_ALL}")
+
+def UpdateDatasetTables(Routes_DataSet, Points_DataSet):
+    # Routes_DataSet'ten unique PointID'leri çıkarın
+    unique_point_ids = np.unique(Routes_DataSet[:, 1])
+
+    # Points_DataSet'i filtreleyin
+    filtered_points = np.array([point for point in Points_DataSet if point[0] in unique_point_ids])
+    print('işlem öncesi Points_DataSet Nokta Sayısı:', len(Points_DataSet))
+    Points_DataSet = filtered_points
+    print('işlem sonrası Points_DataSet Nokta Sayısı:', len(Points_DataSet))
+
+    # Eski PointID'leri yeni PointID'lerle eşleyen bir sözlük oluşturun
+    pointID_mapping = {}
+    for i in range(len(Points_DataSet)):
+        old_pointID = Points_DataSet[i, 0]
+        Points_DataSet[i, 0] = i
+        pointID_mapping[old_pointID] = i
+
+    # Routes_DataSet'teki PointID'leri yeni PointID'lerle güncelleyin
+    for i in range(len(Routes_DataSet)):
+        old_pointID = Routes_DataSet[i, 1]
+        new_pointID = pointID_mapping[old_pointID]
+        Routes_DataSet[i, 1] = new_pointID
+
+    np.savetxt('{}/Points_DataSet.txt'.format(OutputFolder), Points_DataSet)
+    np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
+    print('Yeni Dosyalar Oluşturuldu')
+    return Routes_DataSet, Points_DataSet
+
+def get_Distance(lat1, lon1, lat2, lon2):
+    p1 = [lat1, lon1]
+    p2 = [lat2, lon2]
+    return distance.distance(p1, p2).m
+
+def get_bearing(lat1, long1, lat2, long2):
+    brng = Geodesic.WGS84.Inverse(lat1, long1, lat2, long2)['azi1']
+    return brng
+
+def getPoint2(lat1, lon1, azi1, s12):
+    g = Geodesic.WGS84.Direct(lat1, lon1, azi1, s12)
+    lat2 = g['lat2']
+    long2 = g['lon2']
+    p = Point(lat2,long2)
+    return p
+
+def get_start_points(routes_data):
+    start_points = []
+
+    # Routes_DataSet'i rota numaralarına göre gruplayarak her rotanın başlangıç noktasını bulma
+    for route_no in np.unique(routes_data[:, 0]):
+        route_points = routes_data[routes_data[:, 0] == route_no]
+
+        # Başlangıç noktasını belirleme
+        start_point_index = 0  # Varsayılan olarak ilk nokta
+        start_point = route_points[start_point_index]
+        start_points.append(start_point)
+    return np.array(start_points)
+
+def Sort_outermost_points(start_points):
+    # Merkez noktasını belirleme (Örnek olarak orta noktayı kullanıyoruz)
+    center_lat = np.mean(Points_DataSet[:, 1])
+    center_lon = np.mean(Points_DataSet[:, 2])
+    sorted_start_points = sorted(start_points, key=lambda x: get_Distance(center_lat, center_lon, Points_DataSet[int(x[1]), 1], Points_DataSet[int(x[1]), 2]), reverse=True)
+    return sorted_start_points
+
+def Sort_innermost_points(start_points):
+    # Merkez noktasını belirleme (Örnek olarak orta noktayı kullanıyoruz)
+    center_lat = np.mean(Points_DataSet[:, 1])
+    center_lon = np.mean(Points_DataSet[:, 2])
+    sorted_start_points = sorted(start_points, key=lambda x: get_Distance(center_lat, center_lon, Points_DataSet[int(x[1]), 1], Points_DataSet[int(x[1]), 2]), reverse=False)
+    return sorted_start_points
+
+def get_DistAndBearing(current_point, compared_point, Points_DataSet):
+    # Mesafe ve açı farklarını hesapla
+    lat1, lon1 = Points_DataSet[int(current_point[1]), 1:3]
+    lat2, lon2 = Points_DataSet[int(compared_point[1]), 1:3]
+
+    distance_diff = get_Distance(lat1, lon1, lat2, lon2)
+    angle_difference_next = abs(current_point[2] - compared_point[2])
+    angle_difference_prev = abs(current_point[3] - compared_point[3])
+
+    return distance_diff, angle_difference_next, angle_difference_prev
+
+
+
+def plot_start_points(start_points):
+    # Başlangıç noktalarını çember içinde daire ile işaretleme
+    for start_pointID in start_points:
+        route_no = start_pointID[0].astype(int)
+        lat = Points_DataSet[start_pointID[1].astype(int), 1]
+        lon = Points_DataSet[start_pointID[1].astype(int), 2]
+        # Çizgi çiz
+        plt.plot(lon, lat, marker='o', label=f'Route {int(route_no)}', markersize=0.5, linewidth=0.2)
+
+    plt.xlabel('Latitude')
+    plt.ylabel('Longitude')
+    plt.pause(5.01)
+    plt.show()
+
+def find_points_within_distance(current_point_id, Points_DataSet, distance_threshold):
+    # current_point'ın koordinatlarını al
+    current_point_coords = Points_DataSet[current_point_id][1:3]  # Lat ve lon değerleri
+
+    # KDTree oluştur
+    tree = cKDTree(Points_DataSet[:, 1:3])  # Sadece Lat ve lon sütunları
+
+    # distance_threshold içindeki tüm noktaları bul
+    nearby_points_indices = tree.query_ball_point(current_point_coords, distance_threshold)
+
+    # current_point'ı içeren indisleri kaldır
+    nearby_points_indices.remove(current_point_id)
+
+    return nearby_points_indices
+
+
+def get_GroupsOfPointsToMerge(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet):
+    GroupsOfPointsToMerge =[]
+    New_Points_DataSet = []
+    new_point_id = len(Points_DataSet)
+    print(new_point_id)
+
+    pbar = tqdm(total=len(Temp_Routes_DataSet), desc="Birleşim için Noktalar Gruplanıyor", unit='line')
+    while 0 < len(Temp_Routes_DataSet):
+        # Temp_Routes_DataSet deki işlenen başlangıç noktaları silinirr. Bu işlem işlenmemiş nokta kalmayıncaya kadar devam eder
+        #print(len(Temp_Routes_DataSet))
+        current_group, Temp_Routes_DataSet = SelectPointAndGetNeigbours(Points_DataSet, Temp_Routes_DataSet)
+        #print(len(current_group), len(Temp_Routes_DataSet))
+        pbar.update(len(current_group))
+        #print("Birleşim grubunun içerdiği nokta sayısı= ", len(current_group), "işlenecek başlangıç noktası sayısı = ", len(start_points), current_group)
+        GroupsOfPointsToMerge.append(current_group)
+
+        # current_group: Birleşim grubu, içinde en az 2 veya daha fazla nokta varsa birleşir ve yeni nokta oluşturulur.
+        avg_lat, avg_lon, new_point_id = MergePoints(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id)
+
+        #if len(current_group) > 1:
+            #avg_lat, avg_lon, new_point_id = MergePoints(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id)
+            #print(avg_lat, avg_lon)
+            #print(New_Points_DataSet)
+
+        #np.savetxt('{}/New_Points_DataSet.txt'.format(OutputFolder), New_Points_DataSet)
+        #np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
+    pbar.close()
+    return GroupsOfPointsToMerge, New_Points_DataSet, Routes_DataSet
+
+def SelectPointAndGetNeigbours(Points_DataSet, Temp_Routes_DataSet):
+    # Başlangıç noktaları belirlenir
+    start_points = get_start_points(Temp_Routes_DataSet)
+    #Başlangıç Noktaları dıştan içe sıralanır
+    sorted_start_points = Sort_outermost_points(start_points)
+
+    #Listedeki ilk nokta current_group a eklenir.
+    current_point = sorted_start_points.pop(0)  # Başlangıç noktasını al
+    current_group = [current_point]  # Başlangıç noktasını içeren grup
+    grouped_points = []  # Sınıflandırılmış gruplar
+
+    # Listedeki ilk nokta Temp_Routes_DataSet den silinir. Tekrar işlem yapılmaması için.
+    Temp_Routes_DataSet = remove_point_from_Temp_Routes_DataSet(current_point, Temp_Routes_DataSet)
+
+    #Başlangıç Noktaları komşuluklarına göre Gruplanır
+    i = 0
+    while i < len(sorted_start_points):
+        compared_point = sorted_start_points[i]
+        distance_diff, angle_difference_next, angle_difference_prev = get_DistAndBearing(current_point, compared_point, Points_DataSet)
+        if distance_diff < distance_threshold and ((angle_difference_next < angle_difference_threshold) or (angle_difference_prev<angle_difference_threshold)):
+            current_group.append(compared_point)  # Aynı gruba ekle
+            sorted_start_points.pop(i)  # Kıyaslanan noktayı listeden çıkar
+            Temp_Routes_DataSet = remove_point_from_Temp_Routes_DataSet(compared_point, Temp_Routes_DataSet)
+        else:
+            i += 1
+    return current_group, Temp_Routes_DataSet
+
+def MergePoints(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id):
+    point_ids = [int(point[1]) for point in current_group]
+
+    # Eğer birleşim grubundaki nokta sayısı 1 den fazla ise
+    if len(current_group) > 1:
+        # Birden fazla nokta birleştirilir ve yeni nokta oluşturulur
+        total_lat = np.sum(Points_DataSet[point_ids, 1] * Points_DataSet[point_ids, 3])
+        total_lon = np.sum(Points_DataSet[point_ids, 2] * Points_DataSet[point_ids, 3])
+        total_weight = np.sum(Points_DataSet[point_ids, 3])
+
+        avg_lat = total_lat / total_weight
+        avg_lon = total_lon / total_weight
+
+        # Yeni noktayı Points_DataSet'e ekleyin
+        new_point_id += 1
+        new_point = [new_point_id, avg_lat, avg_lon, total_weight, 1]
+        New_Points_DataSet.append(new_point)
+
+        # Routes_DataSet'i güncelle
+        Routes_DataSet[np.isin(Routes_DataSet[:, 1], point_ids), 1] = new_point_id
+    else:
+        new_point_id += 1
+        avg_lat, avg_lon, total_weight = Points_DataSet[int(current_group[0][1]), 1:4]
+
+        # Tekil Noktalar eğer istenirse ihmal edilebilir. Birleşim sayısı 0 olarak kaydedilir.
+        # Yeni noktayı Points_DataSet'e ekleyin
+        new_point = [new_point_id, avg_lat, avg_lon, total_weight, 0]
+        New_Points_DataSet.append(new_point)
+
+    return avg_lat, avg_lon, new_point_id
+
+def remove_point_from_Temp_Routes_DataSet(current_point, Temp_Routes_DataSet):
+    # İlgili satırı bulmak için ilk iki sütunu karşılaştır
+    indices_to_remove = np.where((Temp_Routes_DataSet[:, 0] == current_point[0]) &
+                                 (Temp_Routes_DataSet[:, 1] == current_point[1]))[0]
+    # Satırı silmek için numpy delete fonksiyonunu kullan
+    Temp_Routes_DataSet = np.delete(Temp_Routes_DataSet, indices_to_remove, axis=0)
+    return Temp_Routes_DataSet
+
+def remove_contained_routes(Routes_DataSet):
+    unique_routes = np.unique(Routes_DataSet[:, 0])
+    route_points_dict = {}
+
+    # Her rota için nokta kümesi oluştur
+    for route_no in unique_routes:
+        route_points = set(Routes_DataSet[Routes_DataSet[:, 0] == route_no][:, 1])
+        route_points_dict[route_no] = route_points
+
+    # Rotaları en çok nokta içerenden en az nokta içerene doğru sırala
+    sorted_routes = sorted(route_points_dict.items(), key=lambda x: len(x[1]), reverse=False)
+
+    to_remove = set()
+
+    # Her bir rota için diğer rotalarla karşılaştırma yap
+    for i, (route1, route1_points) in enumerate(tqdm(sorted_routes, desc="Processing Routes")):
+        if route1 in to_remove:
+            continue
+
+        for route2, route2_points in sorted_routes[i + 1:]:
+            if route2 in to_remove:
+                continue
+
+            if route1_points.issubset(route2_points):
+                to_remove.add(route1)
+                break
+            elif route2_points.issubset(route1_points):
+                to_remove.add(route2)
+
+    mask = np.isin(Routes_DataSet[:, 0], list(to_remove), invert=True)
+    Routes_DataSet = Routes_DataSet[mask]
+    return Routes_DataSet
+
+# Function to run the merging process with given thresholds and collect data
+def run_with_thresholds(distance_threshold, angle_difference_threshold):
+    global Points_DataSet, Routes_DataSet, Temp_Routes_DataSet
+
+    # Load the initial datasets
+    Points_DataSet, Routes_DataSet = ReadDataSets(FileName1='Points_DataSet', FileName2='Routes_DataSet_Dist20_Bearing12')
+    Temp_Routes_DataSet = Routes_DataSet.copy()
+
+    # Perform the merging process
+    GroupsOfPointsToMerge, New_Points_DataSet, Routes_DataSet = get_GroupsOfPointsToMerge(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet)
+
+    # Bir başka rota tarafından içerilen rotalar silinir
+    Routes_DataSet = remove_contained_routes(Routes_DataSet)
+
+    # Save the new datasets (optional)
+    np.savetxt('{}/New_Points_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), New_Points_DataSet)
+    np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
+
+    # Collect the results
+    remaining_points = len(New_Points_DataSet)
+    remaining_routes = len(np.unique(Routes_DataSet[:, 0]))
+    results.append((distance_threshold, angle_difference_threshold, remaining_points, remaining_routes))
+
+
+
+
+
+# Function to run the merging process with given thresholds and collect data
+def run_Process_with_thresholds(distance_threshold, angle_difference_threshold, degree_to_meter):
+    global Points_DataSet, Routes_DataSet, Temp_Routes_DataSet
+
+    # Load the initial datasets
+    Points_DataSet, Routes_DataSet = ReadDataSets(FileName1='Points_DataSet', FileName2='Routes_DataSet_Dist20_Bearing12')
+    Temp_Routes_DataSet = Routes_DataSet.copy()
+
+    # Perform the merging process
+    New_Points_DataSet, Routes_DataSet = Process(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter)
+
+
+    # Bir başka rota tarafından içerilen rotalar silinir
+    Routes_DataSet = remove_contained_routes(Routes_DataSet)
+
+    # Save the new datasets (optional)
+    np.savetxt('{}/New_Points_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), New_Points_DataSet)
+    np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
+    print('{}/New_Points_DataSet_Dist{}_Bearing{}.txt kaydedildi'.format(OutputFolder, distance_threshold, angle_difference_threshold))
+    print('{}/Routes_DataSet_Dist{}_Bearing{}.txt kaydedildi'.format(OutputFolder, distance_threshold, angle_difference_threshold))
+
+    # Collect the results
+    remaining_points = len(New_Points_DataSet)
+    remaining_routes = len(np.unique(Routes_DataSet[:, 0]))
+    results.append((distance_threshold, angle_difference_threshold, remaining_points, remaining_routes))
+
+    results_array = np.array(results)
+    # Save the results to a text file
+    np.savetxt('{}/results.txt'.format(OutputFolder), results_array, fmt='%d %d %d %d',
+               header='Distance_Threshold Angle_Difference_Threshold Remaining_Points Remaining_Routes')
+    print('results.txt kaydedildi.')
+
+def Process(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter):
+    New_Points_DataSet = []
+    new_point_id = len(Points_DataSet)
+    #print(new_point_id)
+
+    pbar = tqdm(total=len(Temp_Routes_DataSet), desc=f"Noktalar Birleştiriliyor. Dist:{distance_threshold}, Angle:{angle_difference_threshold}", unit='line')
+    while 0 < len(Temp_Routes_DataSet):
+        current_group = SelectPointAndGetNeigbours_Optimized(Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter)
+        New_Points_DataSet, Routes_DataSet = MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id)
+        Temp_Routes_DataSet, Points_DataSet = Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, Temp_Routes_DataSet, Points_DataSet)
+        pbar.update(len(current_group))
+
+    return New_Points_DataSet, Routes_DataSet
+
+def SelectPointAndGetNeigbours_Optimized(Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter):
+    # Başlangıç noktaları belirlenir
+    start_points = get_start_points(Temp_Routes_DataSet)
+
+    #Başlangıç Noktaları dıştan içe sıralanır
+    sorted_start_points = Sort_innermost_points(start_points)
+
+    current_point = sorted_start_points.pop(0)  # Başlangıç noktasını al
+
+    current_point_id = int(current_point[1])
+    mask = np.isin(Points_DataSet[:, 0], current_point_id)
+    current_point_indices = np.where(mask)[0][0]
+
+    # Mesafe kriterine göre seçili noktaya yakın noktalar gruplanır
+    nearby_points_IDs_InPointDataSet = find_points_within_distance(current_point_indices, Points_DataSet, distance_threshold, degree_to_meter)
+    current_group = [current_point_id]  # Başlangıç noktasını içeren grup
+
+    # Açı kriterine göre seçili noktaya yakın noktalar gruplanır
+    if len(nearby_points_IDs_InPointDataSet) > 0:
+        grouped_nearby_points_withBearing_InPointDataSet = group_nearby_points(current_point_id, nearby_points_IDs_InPointDataSet, Points_DataSet,
+                                                                           Temp_Routes_DataSet, angle_difference_threshold)
+        current_group.extend(grouped_nearby_points_withBearing_InPointDataSet)
+
+    # PointID ler PointIndices leri bulunur
+    mask = np.isin(Points_DataSet[:, 0], current_group)
+    current_group_indices = np.where(mask)[0]
+    return current_group_indices
+
+def find_points_within_distance(current_point_id, Points_DataSet, distance_threshold, degree_to_meter):
+    # current_point'ın koordinatlarını al
+    current_point_coords = Points_DataSet[current_point_id][1:3]  # Lat ve lon değerleri
+
+    # KDTree oluştur
+    tree = cKDTree(Points_DataSet[:, 1:3])  # Sadece Lat ve lon sütunları
+
+    # Distance_meter'i dereceye dönüştürün
+    distance_degree = distance_threshold / degree_to_meter
+
+    # distance_threshold içindeki tüm noktaları bul
+    nearby_points_indices = tree.query_ball_point(current_point_coords, distance_degree)
+
+    # current_point'ı içeren indisleri kaldır
+    nearby_points_indices.remove(current_point_id)
+
+    nearby_points_IDs = Points_DataSet[nearby_points_indices, 0]
+    return nearby_points_IDs
+
+def group_nearby_points(current_point_id, nearby_points_IDs, Points_DataSet, Temp_Routes_DataSet, angle_difference_threshold):
+    # Başlangıç noktasının bearing değerlerini al
+    current_point_indices = np.where(Temp_Routes_DataSet[:, 1] == current_point_id)[0]
+    current_point_bearings = Temp_Routes_DataSet[current_point_indices[0], 2:4]
+
+    mask = (Temp_Routes_DataSet[:, 1] == current_point_id)
+    #current_point_indices = np.where(mask)[0]
+    current_point_bearings = Temp_Routes_DataSet[mask, 2:4][0]
+
+    # Gruplanmış noktaları saklamak için boş bir liste oluştur
+    grouped_nearby_points = []
+
+    # Başlangıç noktası ile distance_threshold içinde olan tüm noktaları dolaş
+    for point_id in nearby_points_IDs:
+        # Noktanın Temp_Routes_DataSet içindeki indekslerini bul
+        mask = (Temp_Routes_DataSet[:, 1] == point_id)
+        #point_indices = np.where(mask)[0]
+        point_bearings = Temp_Routes_DataSet[mask, 2:4][0]
+
+        # Başlangıç noktasının bearing değeri ile farklarını hesapla
+        bearing_diff_next = abs(current_point_bearings[0] - point_bearings[0])
+        bearing_diff_prev = abs(current_point_bearings[1] - point_bearings[1])
+
+        # Açı farklarını angle_difference_threshold ile karşılaştır ve koşulu sağlayanları grupla
+        if np.any(bearing_diff_next < angle_difference_threshold) or np.any(bearing_diff_prev < angle_difference_threshold):
+            #print(current_point_bearings, point_bearings, bearing_diff_next, bearing_diff_prev, np.any(bearing_diff_next < angle_difference_threshold), np.any(bearing_diff_prev < angle_difference_threshold))
+            grouped_nearby_points.append(point_id)
+
+    return grouped_nearby_points
+
+def MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id):
+    if len(current_group) > 1:
+        # Birden fazla nokta birleştirilir ve yeni nokta oluşturulur
+        total_lat = np.sum(Points_DataSet[current_group, 1] * Points_DataSet[current_group, 3])
+        total_lon = np.sum(Points_DataSet[current_group, 2] * Points_DataSet[current_group, 3])
+        total_weight = np.sum(Points_DataSet[current_group, 3])
+
+        avg_lat = total_lat / total_weight
+        avg_lon = total_lon / total_weight
+
+        # Yeni noktayı Points_DataSet'e ekleyin
+        new_point_id += 1
+        new_point = [new_point_id, avg_lat, avg_lon, total_weight, 1]
+        New_Points_DataSet.append(new_point)
+
+    else:
+        # Tekil Noktalar eğer istenirse ihmal edilebilir. Birleşim sayısı 0 olarak kaydedilir.
+        point_id = int(current_group[0])
+        avg_lat, avg_lon, total_weight = Points_DataSet[point_id, 1:4]
+        new_point_id += 1
+
+        # Tekil(birleşmemiş) Noktalar istenirse ihmal edilebilir. Birleşim sayısı 0 olarak kaydedilir.
+        new_point = [new_point_id, avg_lat, avg_lon, total_weight, 0]
+        New_Points_DataSet.append(new_point)
+
+    # Routes_DataSet'i güncelle
+    Routes_DataSet[np.isin(Routes_DataSet[:, 1], current_group), 1] = new_point_id
+    return New_Points_DataSet, Routes_DataSet
+
+def Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, Temp_Routes_DataSet, Points_DataSet):
+    points_IDs = Points_DataSet[current_group, 0]
+    # İlgili satırları filtreleme kullanarak bul ve kaldır
+    #print(len(Temp_Routes_DataSet), len(Points_DataSet), len(current_group), len(Temp_Routes_DataSet)-len(current_group))
+    mask = np.isin(Temp_Routes_DataSet[:, 1], points_IDs, invert=True)
+    Temp_Routes_DataSet = Temp_Routes_DataSet[mask]
+
+    # Points_DataSet'ten ilgili satırları kaldırmak için boolean maske kullanın
+    mask_points = np.ones(len(Points_DataSet), dtype=bool)
+    mask_points[current_group] = False
+    Points_DataSet = Points_DataSet[mask_points]
+    #print(len(Temp_Routes_DataSet), len(Points_DataSet))
+
+    return Temp_Routes_DataSet, Points_DataSet
+
+def calculate_degree_to_meter(latitude, longitude):
+    # Dünya yarıçapını (metre cinsinden) belirleyin
+    R = 6371000  # Dünya yarıçapı yaklaşık olarak 6371 km
+
+    # Lat ve long değerlerini derece cinsinden alın
+    lat_rad = np.radians(latitude)
+    lon_rad = np.radians(longitude)
+
+    # Yatayda (longitude) bir derecenin metre cinsinden uzunluğunu hesaplayın
+    degree_to_meter_lon = R * np.cos(lat_rad) * np.pi / 180
+
+    # Dikeyde (latitude) bir derecenin metre cinsinden uzunluğunu hesaplayın
+    degree_to_meter_lat = R * np.pi / 180
+
+    # Ortalama bir değer alarak bu iki değeri birleştirin
+    degree_to_meter = (degree_to_meter_lon + degree_to_meter_lat) / 2
+
+    return degree_to_meter
+
+def get_center_lat_long(Points_DataSet):
+    center_lat = np.mean(Points_DataSet[:, 1])
+    center_lon = np.mean(Points_DataSet[:, 2])
+    return center_lat, center_lon
+
+
+# --------------------------------------------------------------------
+InputFolder, OutputFolder = DefineFolders()
+
+
+
+if __name__ == '__main__':
+    #Program Başlangıç saati
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print("Başlangıç Saati =", current_time)
+
+    # Mesafe ve açı farkı eşik değerleri
+    #distance_threshold = 20  # metre
+    #angle_difference_threshold = 12  # derece
+
+    # Define ranges for distance and angle thresholds
+    distance_thresholds = [20, 10, 40, 30]
+    angle_difference_thresholds = [15, 10, 60, 50, 45, 40, 35, 30, 25, 20, 5]
+
+    # Store results
+    results = []
+
+    Points_DataSet, Routes_DataSet = ReadDataSets(FileName1='Points_DataSet', FileName2='Routes_DataSet_Dist20_Bearing12')
+    PrintDataInformation(Routes_DataSet, Points_DataSet)
+    Temp_Routes_DataSet = Routes_DataSet
+
+    center_lat, center_lon = get_center_lat_long(Points_DataSet)
+    degree_to_meter = calculate_degree_to_meter(center_lat, center_lon)
+
+
+
+    """
+    GrafikCiz = False #Grafik çiz True ise grafik çizilir (Programı Hızlandırmak için False yap)
+    if GrafikCiz:
+        plt.ion()
+        figure, ax = plt.subplots(figsize=(100, 60))
+        figManager = plt.get_current_fig_manager()
+        figManager.full_screen_toggle()
+
+
+    # Başlangıç noktalarını sınıflandırma
+    #start_points = get_start_points(Routes_DataSet)
+    #print('Başlangıç noktaları belirlendi')
+
+    # Rotaları ve başlangıç noktalarını çizme
+    #plot_start_points(start_points)
+
+    # Dıştan içe doğru noktalar sıralanır, mesafe ve açı kısıtına göre daha sonra birleştirilmek üzere gruplanır.
+    # Birleştirme ve tablo güncelleme işlemide bu aşamada gerçekleştirilebilir
+    GroupsOfPointsToMerge, New_Points_DataSet, Routes_DataSet = get_GroupsOfPointsToMerge(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet)
+
+    np.savetxt('{}/New_Points_DataSet.txt'.format(OutputFolder), New_Points_DataSet)
+    np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
+    print('Yeni Dosyalar Oluşturuldu')
+    """
+
+    # Paralel işlem için ProcessPoolExecutor kullanın
+    with ProcessPoolExecutor() as executor:
+        # Geleceklerin listesini oluşturun
+        futures = [executor.submit(run_Process_with_thresholds, dist, angle, degree_to_meter)
+                   for angle, dist in itertools.product(angle_difference_thresholds, distance_thresholds)]
+
+        # Tamamlandıkça sonuçları toplayın
+        for future in futures:
+            results.append(future.result())
+
+    # Loop through all combinations of distance and angle thresholds
+    # for angle, dist  in itertools.product(angle_difference_thresholds, distance_thresholds):
+    # print(f"Angle Difference Threshold: {angle}, Running for Distance Threshold: {dist}")
+    # run_main_with_thresholds(dist, angle, degree_to_meter)
+
+    # Convert results to a numpy array for easier handling
+    results_array = np.array(results)
+
+    # Save the results to a text file
+    np.savetxt('{}/results.txt'.format(OutputFolder), results_array, fmt='%d %d %d %d',
+               header='Distance_Threshold Angle_Difference_Threshold Remaining_Points Remaining_Routes')
+    print('results.txt kaydedildi.')
+
+    # Plot and save the scatter plot for remaining points
+    plt.figure(figsize=(6, 6))
+    scatter1 = plt.scatter(results_array[:, 0], results_array[:, 1], c=results_array[:, 2], cmap='viridis')
+    plt.xlabel('Distance Threshold')
+    plt.ylabel('Angle Difference Threshold')
+    plt.title('Remaining Points')
+    plt.colorbar(scatter1, label='Remaining Points')
+    plt.savefig('remaining_points.png')
+    plt.close()
+
+    # Plot and save the scatter plot for remaining routes
+    plt.figure(figsize=(6, 6))
+    scatter2 = plt.scatter(results_array[:, 0], results_array[:, 1], c=results_array[:, 3], cmap='plasma')
+    plt.xlabel('Distance Threshold')
+    plt.ylabel('Angle Difference Threshold')
+    plt.title('Remaining Routes')
+    plt.colorbar(scatter2, label='Remaining Routes')
+    plt.savefig('remaining_routes.png')
+    plt.close()
