@@ -5,6 +5,7 @@ from datetime import datetime
 
 import folium
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 from colorama import Fore, Style
 from geographiclib.geodesic import Geodesic
@@ -12,6 +13,7 @@ from geopy import distance
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 from tqdm import tqdm
+
 
 
 def createFolder(directory):
@@ -133,7 +135,7 @@ def run_Process_with_thresholds(distance_threshold, angle_difference_threshold, 
     # Bir başka rota tarafından içerilen rotalar silinir
     Routes_DataSet = remove_contained_routes(Routes_DataSet)
 
-    # Save the new datasets (optional)
+    # Save the new datasets
     np.savetxt('{}/New_Points_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), New_Points_DataSet)
     np.savetxt('{}/Routes_DataSet_Dist{}_Bearing{}.txt'.format(OutputFolder, distance_threshold, angle_difference_threshold), Routes_DataSet)
 
@@ -151,9 +153,9 @@ def Process(Routes_DataSet, Points_DataSet, Temp_Routes_DataSet, distance_thresh
 
     pbar = tqdm(total=len(Temp_Routes_DataSet), desc=f"Noktalar Birleştiriliyor. Dist:{distance_threshold}, Angle:{angle_difference_threshold}", unit='line')
     while 0 < len(Temp_Routes_DataSet):
-        current_group = SelectPointAndGetNeigbours_Optimized(Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter)
-        New_Points_DataSet, Routes_DataSet, new_point_id = MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id)
-        Temp_Routes_DataSet, Points_DataSet = Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, Temp_Routes_DataSet, Points_DataSet)
+        current_group, current_group_indices = SelectPointAndGetNeigbours_Optimized(Points_DataSet, Temp_Routes_DataSet, distance_threshold, angle_difference_threshold, degree_to_meter)
+        New_Points_DataSet, Routes_DataSet, new_point_id = MergeGrupedPointsAndUpdateTables(current_group, current_group_indices, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id)
+        Temp_Routes_DataSet, Points_DataSet = Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, current_group_indices, Temp_Routes_DataSet, Points_DataSet)
         pbar.update(len(current_group))
 
     return New_Points_DataSet, Routes_DataSet
@@ -181,10 +183,9 @@ def SelectPointAndGetNeigbours_Optimized(Points_DataSet, Temp_Routes_DataSet, di
                                                                            Temp_Routes_DataSet, angle_difference_threshold)
         current_group.extend(grouped_nearby_points_withBearing_InPointDataSet)
 
-    # PointID ler PointIndices leri bulunur
     mask = np.isin(Points_DataSet[:, 0], current_group)
-    current_group_indices = np.where(mask)[0]
-    return current_group_indices
+    current_group_indices = np.where(mask)[0]   # Points_DataSet güncellendiği için Indis ile PointId arasındaki ilişki kayboluyor
+    return current_group, current_group_indices
 
 def find_points_within_distance(current_point_id, Points_DataSet, distance_threshold, degree_to_meter):
     # current_point'ın koordinatlarını al
@@ -235,12 +236,13 @@ def group_nearby_points(current_point_id, nearby_points_IDs, Points_DataSet, Tem
 
     return grouped_nearby_points
 
-def MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id):
+def MergeGrupedPointsAndUpdateTables(current_group, current_group_indices, Points_DataSet, New_Points_DataSet, Routes_DataSet, new_point_id):
     if len(current_group) > 1:
+        # PointID ler PointIndices leri bulunur
         # Birden fazla nokta birleştirilir ve yeni nokta oluşturulur
-        total_lat = np.sum(Points_DataSet[current_group, 1] * Points_DataSet[current_group, 3])
-        total_lon = np.sum(Points_DataSet[current_group, 2] * Points_DataSet[current_group, 3])
-        total_weight = np.sum(Points_DataSet[current_group, 3])
+        total_lat = np.sum(Points_DataSet[current_group_indices, 1] * Points_DataSet[current_group_indices, 3])
+        total_lon = np.sum(Points_DataSet[current_group_indices, 2] * Points_DataSet[current_group_indices, 3])
+        total_weight = np.sum(Points_DataSet[current_group_indices, 3])
 
         avg_lat = total_lat / total_weight
         avg_lon = total_lon / total_weight
@@ -252,7 +254,7 @@ def MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_D
 
     else:
         # Tekil Noktalar eğer istenirse ihmal edilebilir. Birleşim sayısı 0 olarak kaydedilir.
-        point_id = int(current_group[0])
+        point_id = int(current_group_indices[0])
         avg_lat, avg_lon, total_weight = Points_DataSet[point_id, 1:4]
         new_point_id += 1
 
@@ -264,16 +266,16 @@ def MergeGrupedPointsAndUpdateTables(current_group, Points_DataSet, New_Points_D
     Routes_DataSet[np.isin(Routes_DataSet[:, 1], current_group), 1] = new_point_id
     return New_Points_DataSet, Routes_DataSet, new_point_id
 
-def Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, Temp_Routes_DataSet, Points_DataSet):
-    points_IDs = Points_DataSet[current_group, 0]
+def Update_Temp_Routes_DataSet_and_Points_DataSet(current_group, current_group_indices, Temp_Routes_DataSet, Points_DataSet):
+    #points_IDs = Points_DataSet[current_group, 0]
     # İlgili satırları filtreleme kullanarak bul ve kaldır
     #print(len(Temp_Routes_DataSet), len(Points_DataSet), len(current_group), len(Temp_Routes_DataSet)-len(current_group))
-    mask = np.isin(Temp_Routes_DataSet[:, 1], points_IDs, invert=True)
+    mask = np.isin(Temp_Routes_DataSet[:, 1], current_group, invert=True)
     Temp_Routes_DataSet = Temp_Routes_DataSet[mask]
 
     # Points_DataSet'ten ilgili satırları kaldırmak için boolean maske kullanın
     mask_points = np.ones(len(Points_DataSet), dtype=bool)
-    mask_points[current_group] = False
+    mask_points[current_group_indices] = False
     Points_DataSet = Points_DataSet[mask_points]
     #print(len(Temp_Routes_DataSet), len(Points_DataSet))
 
@@ -592,50 +594,79 @@ def Combinated_GraphicsSoftColored(OutputFolder, angle_difference_thresholds, di
     return
 
 # Plot Maps
-def plot_AllRoutes_Folium(Routes_DataSet, Points_DataSet, OutputFolder, distance_threshold, angle_difference_threshold, title_text="Routes"):
+def plot_AllRoutes_Folium(Points_DataSet, OutputFolder, dist, angle, title_text="Routes"):
+    # Dosya adlarını oluşturma
+    new_points_file = f"{OutputFolder}/New_Points_DataSet_Dist{dist}_Bearing{angle}.txt"
+    routes_file = f"{OutputFolder}/Routes_DataSet_Dist{dist}_Bearing{angle}.txt"
+
+    # Dosyaları okuma
+    New_Points_DataSet = np.loadtxt(new_points_file)
+    Routes_DataSet = np.loadtxt(routes_file)
+
+    # Veri kümelerini birleştir
+    New_Points_DataSet = np.vstack((Points_DataSet, New_Points_DataSet))
+
     # Create a map centered at the average latitude and longitude
-    avg_lat = np.mean(Points_DataSet[:, 1])
-    avg_lon = np.mean(Points_DataSet[:, 2])
-    m = folium.Map(location=[avg_lat, avg_lon], zoom_start=12)
+    avg_lat = np.mean(New_Points_DataSet[:, 1])
+    avg_lon = np.mean(New_Points_DataSet[:, 2])
+    m = folium.Map(location=[avg_lat, avg_lon], zoom_start=16)
 
     # Define a colormap
-    colors = plt.get_cmap("tab20", len(np.unique(Routes_DataSet[:, 0])))
+    cmap = plt.get_cmap("tab20", len(np.unique(Routes_DataSet[:, 0])))
+    colors = [cmap(i) for i in range(cmap.N)]
 
     for idx, route_no in enumerate(np.unique(Routes_DataSet[:, 0])):
         route_points = Routes_DataSet[Routes_DataSet[:, 0] == route_no]
         point_ids = route_points[:, 1].astype(int)
 
-        latitudes = Points_DataSet[Points_DataSet[:, 0].astype(int) == point_ids[0], 1]
-        longitudes = Points_DataSet[Points_DataSet[:, 0].astype(int) == point_ids[0], 2]
+        # Rota başlangıç noktasını belirleme
+        #r_latitudes = New_Points_DataSet[np.isin(New_Points_DataSet[:, 0].astype(int), point_ids), 1]
+        #r_longitudes = New_Points_DataSet[np.isin(New_Points_DataSet[:, 0].astype(int), point_ids), 2]
 
-        plt.scatter(longitudes, latitudes, color='Blue', marker='^', s=5, label=f"Route {int(route_no)} Start" if idx == 0 else "")
 
         # Initialize lists for route latitudes and longitudes
         route_latitudes = []
         route_longitudes = []
 
-        for point_id in point_ids:
-            point = Points_DataSet[Points_DataSet[:, 0].astype(int) == point_id]
+        for p, point_id in enumerate(point_ids):
+            point = New_Points_DataSet[New_Points_DataSet[:, 0].astype(int) == point_id]
             lat, lon, weight = point[0, 1:4]
+
+            """
+            if p == 0:
+                # Başlangıç noktasını işaretle
+                folium.CircleMarker(location=[lat, lon], radius=4, color='blue', fill=True, fill_color='blue', fill_opacity=1,
+                                    popup=f"RouteNO {int(route_no)}, PointID {int(point_id)}").add_to(m)
+            """
+
 
             route_latitudes.append(lat)
             route_longitudes.append(lon)
 
+            """
             # Add markers for points
             if weight == 1:
-                plt.scatter(lon, lat, color='red', marker='s', s=2)
+                folium.CircleMarker(location=[lat, lon], radius=2, color='red', fill=True, fill_color='red', fill_opacity=1,
+                                    popup=f"RouteNO {int(route_no)}, PointID {int(point_id)}").add_to(m)
             else:
-                plt.scatter(lon, lat, color=colors(idx), marker='o', s=3)
-        if route_no % 100 == 0:
+                folium.CircleMarker(location=[lat, lon], radius=3, color='green', fill=True, fill_color='green', fill_opacity=1,
+                                    popup=f"RouteNO {int(route_no)}, PointID {int(point_id)}").add_to(m)
+            """
+
+        # Add the route to the map
+        route_color = colors[idx]
+        #folium.PolyLine(locations=list(zip(route_latitudes, route_longitudes)), color=mpl.colors.to_hex(route_color), weight=2, opacity=0.8, popup=f"Route {route_no}").add_to(m)
+        folium.PolyLine(locations=list(zip(route_latitudes, route_longitudes)), color='black', weight=1, opacity=0.8, popup=f"Route {route_no}").add_to(m)
+
+        if route_no % 2000 == 0:
             print(route_no)
-            # Add the route to the map
-            folium.PolyLine(locations=list(zip(route_latitudes, route_longitudes)), color=colors(idx), weight=3, opacity=0.8, popup=f"Route {route_no}").add_to(m)
+
             # Save the map to an HTML file
-            output_file = f'{OutputFolder}/{title_text}_Dist{distance_threshold}_Bearing{angle_difference_threshold}.html'
+            output_file = f'{OutputFolder}/{title_text}_Dist{dist}_Bearing{angle}_{route_no}_line.html'
             m.save(output_file)
 
     # Save the map to an HTML file
-    output_file = f'{OutputFolder}/{title_text}_Dist{distance_threshold}_Bearing{angle_difference_threshold}.html'
+    output_file = f'{OutputFolder}/{title_text}_Dist{dist}_Bearing{angle}_Line.html'
     m.save(output_file)
     print(f"Map saved to {OutputFolder}")
 
@@ -656,8 +687,11 @@ if __name__ == '__main__':
     #angle_difference_threshold = 12  # derece
 
     # Define ranges for distance and angle thresholds
-    distance_thresholds = [10, 20, 30, 40]
+    distance_thresholds = [10, 20, 30, 40, 50]
     angle_difference_thresholds = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60]
+
+    #distance_thresholds = [50, 40, 30, 20, 10]
+    #angle_difference_thresholds = [60, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5]
 
     # Store results
     results = []
@@ -672,13 +706,14 @@ if __name__ == '__main__':
     center_lat, center_lon = get_center_lat_long(Points_DataSet)
     degree_to_meter = calculate_degree_to_meter(center_lat, center_lon)
 
+    """
     # Paralel işlem için ProcessPoolExecutor kullanın
     with ProcessPoolExecutor() as executor:
         # Geleceklerin listesini oluşturun
         futures = [executor.submit(run_Process_with_thresholds, dist, angle, degree_to_meter)
                    for angle, dist in itertools.product(angle_difference_thresholds, distance_thresholds)]
 
-
+    """
 
     # ----------------------------------------------- Stage 2: create file containing results and draw graphics
     results = create_result_file(distance_thresholds, angle_difference_thresholds, OutputFolder)
@@ -687,10 +722,10 @@ if __name__ == '__main__':
 
     # ----------------------------------------------- Draw Graphics
 
-    Graphic_1(OutputFolder)
-    separate_Graphics(OutputFolder, angle_difference_thresholds, distance_thresholds)
-    Combinated_Graphics(OutputFolder, angle_difference_thresholds, distance_thresholds)
-    Combinated_GraphicsSoftColored(OutputFolder, angle_difference_thresholds, distance_thresholds)
+    #Graphic_1(OutputFolder)
+    #separate_Graphics(OutputFolder, angle_difference_thresholds, distance_thresholds)
+    #Combinated_Graphics(OutputFolder, angle_difference_thresholds, distance_thresholds)
+    #Combinated_GraphicsSoftColored(OutputFolder, angle_difference_thresholds, distance_thresholds)
 
 
 
@@ -698,8 +733,13 @@ if __name__ == '__main__':
     # .............................. SHOW Datasets on Maps
 
     # İlk deneme için bir eşik değeri ve açı farkı seçimi
-    dist_threshold = distance_thresholds[3]
-    angle_diff_threshold = angle_difference_thresholds[10]
+    #distance_thresholds = [10, 20, 30, 40, 50]
+    #angle_difference_thresholds = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60]
+    #dist_threshold = distance_thresholds[1]
+    #angle_diff_threshold = angle_difference_thresholds[2]
+
+    dist_threshold = 10
+    angle_diff_threshold = 5
 
     # Folium ile rotaları haritada görselleştirme
-    plot_AllRoutes_Folium(Routes_DataSet, Points_DataSet, OutputFolder, dist_threshold, angle_diff_threshold)
+    plot_AllRoutes_Folium(Points_DataSet, OutputFolder, dist_threshold, angle_diff_threshold)
